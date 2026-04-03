@@ -7,10 +7,10 @@ JWT auth with bcrypt + python-jose	                                    Simple ?u
 15 packages in requirements.txt	                                        3 packages
 Needs docker-compose up to run	                                        Just uvicorn app.main:app --reload
 
-To run: uvicorn app.main:app --reload then hit /docs for the Swagger UI.
+To run: uvicorn app.main:app --reload 
+Swagger Link : hit /docs for the Swagger UI.
 
 Mock users for testing:
-
 ?user_id=1 → admin (full access)
 ?user_id=2 → agent (can review claims)
 ?user_id=3 or 4 → customer (own data only)
