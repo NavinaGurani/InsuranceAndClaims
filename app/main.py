@@ -1,62 +1,281 @@
-from contextlib import asynccontextmanager
+"""
+Insurance & Claims Management API — simplified sample project.
+Uses in-memory mock data; no database required.
 
-from fastapi import FastAPI, Request
+Auth: pass `user_id` as a query parameter (e.g. ?user_id=1).
+  user 1 = admin, user 2 = agent, user 3/4 = customer
+"""
+
+from datetime import datetime
+from typing import Optional
+
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
-from app.core.config import settings
-from app.core.logging import setup_logging, get_logger
-from app.db.session import init_db
-
-from app.api.v1.endpoints.auth import router as auth_router
-from app.api.v1.endpoints.policies import router as policy_router
-from app.api.v1.endpoints.claims import router as claim_router
-from app.api.v1.endpoints.payments import router as payment_router
-from app.api.v1.endpoints.documents import router as document_router
-from app.api.v1.endpoints.health import router as health_router
-
-setup_logging()
-logger = get_logger(__name__)
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    logger.info("Starting %s [%s]", settings.APP_NAME, settings.APP_ENV)
-    await init_db()
-    logger.info("Database tables ready")
-    yield
-    logger.info("Shutting down %s", settings.APP_NAME)
-
+from app.mock_data import (
+    USERS, POLICIES, CLAIMS, PAYMENTS, NEXT_IDS, CLAIM_TRANSITIONS,
+)
+from app.schemas import (
+    UserCreate, UserOut,
+    PolicyCreate, PolicyUpdate, PolicyOut,
+    ClaimCreate, ClaimStatusUpdate, ClaimOut,
+    PaymentCreate, PaymentOut,
+    TriageResult,
+)
+from app.agents.claim_agent import triage_claim
 
 app = FastAPI(
-    title=settings.APP_NAME,
+    title="Insurance & Claims API (Mock)",
     version="1.0.0",
-    description="Insurance Policy & Claims Management API",
-    docs_url="/docs",
-    redoc_url="/redoc",
-    lifespan=lifespan,
+    description="Sample project with in-memory mock data. Pass ?user_id=1/2/3/4 to simulate auth.",
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.origins,
-    allow_credentials=True,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# Global exception handler — keep stack traces server-side only
-@app.exception_handler(Exception)
-async def unhandled_exception_handler(request: Request, exc: Exception):
-    logger.exception("Unhandled error on %s %s", request.method, request.url)
-    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def get_user(user_id: int) -> dict:
+    user = USERS.get(user_id)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unknown user_id")
+    return user
 
 
-API_PREFIX = "/api/v1"
-app.include_router(health_router)
-app.include_router(auth_router, prefix=API_PREFIX)
-app.include_router(policy_router, prefix=API_PREFIX)
-app.include_router(claim_router, prefix=API_PREFIX)
-app.include_router(payment_router, prefix=API_PREFIX)
-app.include_router(document_router, prefix=API_PREFIX)
+def next_id(entity: str) -> int:
+    uid = NEXT_IDS[entity]
+    NEXT_IDS[entity] += 1
+    return uid
+
+
+def check_policy_access(policy: dict, user: dict) -> None:
+    if user["role"] == "customer" and policy["owner_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+
+def check_claim_access(claim: dict, user: dict) -> None:
+    if user["role"] == "customer" and claim["claimant_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+
+def check_payment_access(payment: dict, user: dict) -> None:
+    if user["role"] == "customer" and payment["payer_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+
+# ── Health ─────────────────────────────────────────────────────────────────────
+
+@app.get("/health", tags=["health"])
+def health():
+    return {"status": "ok", "data": "in-memory mock"}
+
+
+# ── Users ──────────────────────────────────────────────────────────────────────
+
+@app.get("/api/v1/users", response_model=list[UserOut], tags=["users"])
+def list_users(user_id: int = Query(...)):
+    user = get_user(user_id)
+    if user["role"] not in ("admin", "agent"):
+        raise HTTPException(status_code=403, detail="Admins and agents only")
+    return list(USERS.values())
+
+
+@app.post("/api/v1/users", response_model=UserOut, status_code=201, tags=["users"])
+def create_user(body: UserCreate, user_id: int = Query(...)):
+    user = get_user(user_id)
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admins only")
+    if any(u["email"] == body.email for u in USERS.values()):
+        raise HTTPException(status_code=409, detail="Email already exists")
+    uid = next_id("user")
+    new_user = {
+        "id": uid,
+        "email": body.email,
+        "full_name": body.full_name,
+        "role": body.role,
+        "is_active": True,
+        "created_at": datetime.utcnow(),
+    }
+    USERS[uid] = new_user
+    return new_user
+
+
+# ── Policies ───────────────────────────────────────────────────────────────────
+
+@app.get("/api/v1/policies", response_model=list[PolicyOut], tags=["policies"])
+def list_policies(user_id: int = Query(...)):
+    user = get_user(user_id)
+    if user["role"] == "customer":
+        return [p for p in POLICIES.values() if p["owner_id"] == user["id"]]
+    return list(POLICIES.values())
+
+
+@app.get("/api/v1/policies/{policy_id}", response_model=PolicyOut, tags=["policies"])
+def get_policy(policy_id: int, user_id: int = Query(...)):
+    user = get_user(user_id)
+    policy = POLICIES.get(policy_id)
+    if not policy:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    check_policy_access(policy, user)
+    return policy
+
+
+@app.post("/api/v1/policies", response_model=PolicyOut, status_code=201, tags=["policies"])
+def create_policy(body: PolicyCreate, user_id: int = Query(...)):
+    user = get_user(user_id)
+    pid = next_id("policy")
+    policy = {
+        "id": pid,
+        "policy_number": f"POL-{pid:04d}",
+        "owner_id": user["id"],
+        "policy_type": body.policy_type,
+        "status": "pending",
+        "coverage_amount": body.coverage_amount,
+        "premium_amount": body.premium_amount,
+        "start_date": body.start_date,
+        "end_date": body.end_date,
+        "description": body.description,
+        "created_at": datetime.utcnow(),
+    }
+    POLICIES[pid] = policy
+    return policy
+
+
+@app.patch("/api/v1/policies/{policy_id}", response_model=PolicyOut, tags=["policies"])
+def update_policy(policy_id: int, body: PolicyUpdate, user_id: int = Query(...)):
+    user = get_user(user_id)
+    if user["role"] not in ("admin", "agent"):
+        raise HTTPException(status_code=403, detail="Admins and agents only")
+    policy = POLICIES.get(policy_id)
+    if not policy:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    if body.status is not None:
+        policy["status"] = body.status
+    if body.description is not None:
+        policy["description"] = body.description
+    return policy
+
+
+# ── Claims ─────────────────────────────────────────────────────────────────────
+
+@app.get("/api/v1/claims", response_model=list[ClaimOut], tags=["claims"])
+def list_claims(user_id: int = Query(...)):
+    user = get_user(user_id)
+    if user["role"] == "customer":
+        return [c for c in CLAIMS.values() if c["claimant_id"] == user["id"]]
+    return list(CLAIMS.values())
+
+
+@app.get("/api/v1/claims/{claim_id}", response_model=ClaimOut, tags=["claims"])
+def get_claim(claim_id: int, user_id: int = Query(...)):
+    user = get_user(user_id)
+    claim = CLAIMS.get(claim_id)
+    if not claim:
+        raise HTTPException(status_code=404, detail="Claim not found")
+    check_claim_access(claim, user)
+    return claim
+
+
+@app.post("/api/v1/claims", response_model=ClaimOut, status_code=201, tags=["claims"])
+def create_claim(body: ClaimCreate, user_id: int = Query(...)):
+    user = get_user(user_id)
+    policy = POLICIES.get(body.policy_id)
+    if not policy:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    if user["role"] == "customer" and policy["owner_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="You do not own this policy")
+    cid = next_id("claim")
+    claim = {
+        "id": cid,
+        "claim_number": f"CLM-{cid:04d}",
+        "policy_id": body.policy_id,
+        "claimant_id": user["id"],
+        "status": "submitted",
+        "claim_amount": body.claim_amount,
+        "incident_date": body.incident_date,
+        "description": body.description,
+        "reviewer_notes": None,
+        "created_at": datetime.utcnow(),
+    }
+    CLAIMS[cid] = claim
+    return claim
+
+
+@app.patch("/api/v1/claims/{claim_id}/status", response_model=ClaimOut, tags=["claims"])
+def update_claim_status(claim_id: int, body: ClaimStatusUpdate, user_id: int = Query(...)):
+    user = get_user(user_id)
+    if user["role"] not in ("admin", "agent"):
+        raise HTTPException(status_code=403, detail="Admins and agents only")
+    claim = CLAIMS.get(claim_id)
+    if not claim:
+        raise HTTPException(status_code=404, detail="Claim not found")
+    allowed = CLAIM_TRANSITIONS.get(claim["status"], [])
+    if body.status not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot transition from '{claim['status']}' to '{body.status}'. Allowed: {allowed}",
+        )
+    claim["status"] = body.status
+    if body.reviewer_notes is not None:
+        claim["reviewer_notes"] = body.reviewer_notes
+    return claim
+
+
+@app.get("/api/v1/claims/{claim_id}/triage", response_model=TriageResult, tags=["claims"])
+def triage(claim_id: int, user_id: int = Query(...)):
+    user = get_user(user_id)
+    if user["role"] not in ("admin", "agent"):
+        raise HTTPException(status_code=403, detail="Admins and agents only")
+    claim = CLAIMS.get(claim_id)
+    if not claim:
+        raise HTTPException(status_code=404, detail="Claim not found")
+    return triage_claim(claim)
+
+
+# ── Payments ───────────────────────────────────────────────────────────────────
+
+@app.get("/api/v1/payments", response_model=list[PaymentOut], tags=["payments"])
+def list_payments(user_id: int = Query(...)):
+    user = get_user(user_id)
+    if user["role"] == "customer":
+        return [p for p in PAYMENTS.values() if p["payer_id"] == user["id"]]
+    return list(PAYMENTS.values())
+
+
+@app.get("/api/v1/payments/{payment_id}", response_model=PaymentOut, tags=["payments"])
+def get_payment(payment_id: int, user_id: int = Query(...)):
+    user = get_user(user_id)
+    payment = PAYMENTS.get(payment_id)
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    check_payment_access(payment, user)
+    return payment
+
+
+@app.post("/api/v1/payments", response_model=PaymentOut, status_code=201, tags=["payments"])
+def create_payment(body: PaymentCreate, user_id: int = Query(...)):
+    user = get_user(user_id)
+    policy = POLICIES.get(body.policy_id)
+    if not policy:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    if user["role"] == "customer" and policy["owner_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="You do not own this policy")
+    pid = next_id("payment")
+    payment = {
+        "id": pid,
+        "transaction_id": f"TXN-{pid:04d}",
+        "policy_id": body.policy_id,
+        "payer_id": user["id"],
+        "amount": body.amount,
+        "status": "completed",
+        "method": body.method,
+        "reference": f"MOCK-REF-{pid:04d}",
+        "created_at": datetime.utcnow(),
+    }
+    PAYMENTS[pid] = payment
+    return payment

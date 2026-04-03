@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(venv/Scripts/pip install:*)",
+      "Bash(venv/Scripts/python -c \"from app.main import app; print\\('OK — routes:', [r.path for r in app.routes]\\)\")"
+    ]
+  }
+}
