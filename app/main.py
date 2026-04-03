@@ -257,4 +257,25 @@ def get_payment(payment_id: int, user_id: int = Query(...)):
     return payment
 
 
-
+@app.post("/api/v1/payments", response_model=PaymentOut, status_code=201, tags=["payments"])
+def create_payment(body: PaymentCreate, user_id: int = Query(...)):
+    user = get_user(user_id)
+    policy = POLICIES.get(body.policy_id)
+    if not policy:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    if user["role"] == "customer" and policy["owner_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="You do not own this policy")
+    pid = next_id("payment")
+    payment = {
+        "id": pid,
+        "transaction_id": f"TXN-{pid:04d}",
+        "policy_id": body.policy_id,
+        "payer_id": user["id"],
+        "amount": body.amount,
+        "status": "completed",
+        "method": body.method,
+        "reference": f"MOCK-REF-{pid:04d}",
+        "created_at": datetime.utcnow(),
+    }
+    PAYMENTS[pid] = payment
+    return payment
