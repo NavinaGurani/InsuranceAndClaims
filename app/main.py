@@ -223,6 +223,8 @@ def update_claim_status(claim_id: int, body: ClaimStatusUpdate, user_id: int = Q
     claim["status"] = body.status
     if body.reviewer_notes is not None:
         claim["reviewer_notes"] = body.reviewer_notes
+    if body.reviewer_id is not None:
+        claim["reviewer_id"] = body.reviewer_id    
     return claim
 
 
@@ -236,6 +238,37 @@ def triage(claim_id: int, user_id: int = Query(...)):
         raise HTTPException(status_code=404, detail="Claim not found")
     return triage_claim(claim)
 
+# ── Policy → Claims ────────────────────────────────────────────────────────────
+@app.get("/api/v1/policies/{policy_id}/claims", response_model=list[ClaimOut], tags=["policies"])
+def list_policy_claims(policy_id: int, user_id: int = Query(...)):
+    """List all claims filed under a specific policy."""
+    user = get_user(user_id)
+    policy = POLICIES.get(policy_id)
+    if not policy:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    check_policy_access(policy, user)
+    return [c for c in CLAIMS.values() if c["policy_id"] == policy_id]
+
+# ── Claims Summary ─────────────────────────────────────────────────────────────
+
+@app.get("/api/v1/claims/summary", tags=["claims"])
+def claims_summary(user_id: int = Query(...)):
+    """Admin/agent: claim counts grouped by status + total claimed amount."""
+    user = get_user(user_id)
+    if user["role"] not in ("admin", "agent"):
+        raise HTTPException(status_code=403, detail="Admins and agents only")
+
+    by_status: dict[str, int] = {}
+    total_amount = 0.0
+    for claim in CLAIMS.values():
+        by_status[claim["status"]] = by_status.get(claim["status"], 0) + 1
+        total_amount += claim.get("claim_amount", 0)
+
+    return {
+        "total_claims": len(CLAIMS),
+        "by_status": by_status,
+        "total_claimed_amount": round(total_amount, 2),
+    }
 
 # ── Payments ───────────────────────────────────────────────────────────────────
 
