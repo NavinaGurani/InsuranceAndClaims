@@ -47,6 +47,14 @@ USERS: dict[int, dict] = {
         "is_active": True,
         "created_at": datetime(2024, 2, 1),
     },
+    6: {
+        "id": 6,
+        "email": "frank@insure.io",
+        "full_name": "Frank Friend",
+        "role": "customer",
+        "is_active": True,
+        "created_at": datetime(2024, 2, 1),
+    },
 }
 
 # ── Policies ───────────────────────────────────────────────────────────────────
