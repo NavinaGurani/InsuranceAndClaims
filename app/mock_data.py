@@ -38,14 +38,6 @@ USERS: dict[int, dict] = {
         "role": "customer",
         "is_active": True,
         "created_at": datetime(2024, 2, 1),
-    },
-    5: {
-        "id": 5,
-        "email": "eve@insure.io",
-        "full_name": "Eve Evergreen",
-        "role": "customer",
-        "is_active": True,
-        "created_at": datetime(2024, 2, 1),
     }
 }
 
