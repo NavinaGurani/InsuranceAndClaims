@@ -12,6 +12,7 @@ PolicyStatus    = str  # "active" | "expired" | "cancelled" | "pending"
 ClaimStatus     = str  # "submitted" | "under_review" | "approved" | "rejected" | "paid"
 PaymentStatus   = str  # "pending" | "completed" | "failed" | "refunded"
 PaymentMethod   = str  # "card" | "bank_transfer" | "upi" | "wallet"
+FraudLevel      = str  # "low" | "medium" | "high"
 
 
 # ── User ───────────────────────────────────────────────────────────────────────
@@ -90,6 +91,7 @@ class PaymentCreate(BaseModel):
     policy_id: int
     amount: float
     method: PaymentMethod
+    fraud_override: bool = False  # Admin-only: bypass anomaly hold
 
 
 class PaymentOut(BaseModel):
@@ -110,3 +112,33 @@ class TriageResult(BaseModel):
     risk_score: float
     flag: str          # "low" | "medium" | "high"
     reasons: list[str]
+
+
+# ── Fraud ───────────────────────────────────────────────────────────────────────
+class FraudReport(BaseModel):
+    claim_id: int
+    fraud_score: float
+    fraud_level: FraudLevel
+    signals: list[str]
+    auto_flag: bool
+
+
+class PaymentAnomalyReport(BaseModel):
+    payment_id: int
+    anomaly_score: float
+    anomaly_level: str
+    anomalies: list[str]
+    hold_for_review: bool
+
+
+# ── Bulk Operations ─────────────────────────────────────────────────────────────
+class BulkClaimStatusUpdate(BaseModel):
+    claim_ids: list[int]
+    status: ClaimStatus
+    reviewer_notes: Optional[str] = None
+
+
+class BulkClaimStatusResult(BaseModel):
+    updated: list[int]
+    skipped: list[int]
+    errors: list[str]
