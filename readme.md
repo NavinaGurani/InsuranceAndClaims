@@ -16,3 +16,5 @@ Mock users for testing:
 ?user_id=3 or 4 → customer (own data only)
 
 [sample endpoint](http://127.0.0.1:8000/api/v1/users?user_id=1)
+
+Adding some random text to view the changes
