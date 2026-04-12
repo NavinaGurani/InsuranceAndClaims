@@ -21,11 +21,8 @@ from app.schemas import (
     ClaimCreate, ClaimStatusUpdate, ClaimOut,
     PaymentCreate, PaymentOut,
     TriageResult,
-    FraudReport, PaymentAnomalyReport,
-    BulkClaimStatusUpdate, BulkClaimStatusResult,
 )
 from app.agents.claim_agent import triage_claim
-from app.services.fraud_detection import analyze_claim_fraud, analyze_payment_anomaly
 
 app = FastAPI(
     title="Insurance & Claims API (Mock)",
@@ -237,48 +234,7 @@ def triage(claim_id: int, user_id: int = Query(...)):
     claim = CLAIMS.get(claim_id)
     if not claim:
         raise HTTPException(status_code=404, detail="Claim not found")
-    policy = POLICIES.get(claim["policy_id"])
-    claimant_history = [
-        c for c in CLAIMS.values()
-        if c["claimant_id"] == claim["claimant_id"] and c["id"] != claim_id
-    ]
-    return triage_claim(claim, policy=policy, claimant_history=claimant_history)
-
-
-@app.get("/api/v1/claims/{claim_id}/fraud", response_model=FraudReport, tags=["claims"])
-def fraud_analysis(claim_id: int, user_id: int = Query(...)):
-    user = get_user(user_id)
-    if user["role"] not in ("admin", "agent"):
-        raise HTTPException(status_code=403, detail="Admins and agents only")
-    claim = CLAIMS.get(claim_id)
-    if not claim:
-        raise HTTPException(status_code=404, detail="Claim not found")
-    return analyze_claim_fraud(claim, all_claims=CLAIMS, policies=POLICIES)
-
-
-@app.post("/api/v1/claims/bulk-status", response_model=BulkClaimStatusResult, tags=["claims"])
-def bulk_update_claim_status(body: BulkClaimStatusUpdate, user_id: int = Query(...)):
-    user = get_user(user_id)
-    if user["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Admins only")
-    updated, skipped, errors = [], [], []
-    for cid in body.claim_ids:
-        claim = CLAIMS.get(cid)
-        if not claim:
-            errors.append(f"Claim {cid} not found")
-            continue
-        allowed = CLAIM_TRANSITIONS.get(claim["status"], [])
-        if body.status not in allowed:
-            skipped.append(cid)
-            errors.append(
-                f"Claim {cid}: cannot transition '{claim['status']}' → '{body.status}'"
-            )
-            continue
-        claim["status"] = body.status
-        if body.reviewer_notes is not None:
-            claim["reviewer_notes"] = body.reviewer_notes
-        updated.append(cid)
-    return BulkClaimStatusResult(updated=updated, skipped=skipped, errors=errors)
+    return triage_claim(claim)
 
 
 # ── Payments ───────────────────────────────────────────────────────────────────
@@ -309,29 +265,6 @@ def create_payment(body: PaymentCreate, user_id: int = Query(...)):
         raise HTTPException(status_code=404, detail="Policy not found")
     if user["role"] == "customer" and policy["owner_id"] != user["id"]:
         raise HTTPException(status_code=403, detail="You do not own this policy")
-
-    # Pre-flight anomaly check on the candidate payment record
-    candidate = {
-        "id": -1,
-        "policy_id": body.policy_id,
-        "payer_id": user["id"],
-        "amount": body.amount,
-        "method": body.method,
-        "created_at": datetime.utcnow(),
-    }
-    anomaly = analyze_payment_anomaly(candidate, policies=POLICIES, all_payments=PAYMENTS)
-    if anomaly["hold_for_review"] and not body.fraud_override:
-        raise HTTPException(
-            status_code=402,
-            detail={
-                "message": "Payment held for fraud review. Use fraud_override=true to force (admin only).",
-                "anomaly_score": anomaly["anomaly_score"],
-                "anomalies": anomaly["anomalies"],
-            },
-        )
-    if body.fraud_override and user["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Only admins may override fraud holds")
-
     pid = next_id("payment")
     payment = {
         "id": pid,
@@ -346,14 +279,3 @@ def create_payment(body: PaymentCreate, user_id: int = Query(...)):
     }
     PAYMENTS[pid] = payment
     return payment
-
-
-@app.get("/api/v1/payments/{payment_id}/anomaly", response_model=PaymentAnomalyReport, tags=["payments"])
-def payment_anomaly(payment_id: int, user_id: int = Query(...)):
-    user = get_user(user_id)
-    if user["role"] not in ("admin", "agent"):
-        raise HTTPException(status_code=403, detail="Admins and agents only")
-    payment = PAYMENTS.get(payment_id)
-    if not payment:
-        raise HTTPException(status_code=404, detail="Payment not found")
-    return analyze_payment_anomaly(payment, policies=POLICIES, all_payments=PAYMENTS)
