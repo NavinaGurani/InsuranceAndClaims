@@ -70,6 +70,7 @@ class ClaimCreate(BaseModel):
 class ClaimStatusUpdate(BaseModel):
     status: ClaimStatus
     reviewer_notes: Optional[str] = None
+    reviewer_id: Optional[int] = None
 
 
 class ClaimOut(BaseModel):
